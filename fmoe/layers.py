@@ -1,6 +1,9 @@
 r"""
 Layers that FMoE provides to users
 """
+import logging
+log = logging.getLogger(__name__)
+
 import torch
 import torch.nn as nn
 import math
@@ -44,6 +47,7 @@ class FMoELinear(nn.Module):
         r"""
         Call MOE function
         """
+        log.debug(f'expert weight shape: {self.weight.shape}')
         x = MOELinear.apply(inp, fwd_expert_count, self.weight, self.bias)
         return x
 
@@ -93,13 +97,16 @@ def _fmoe_general_global_forward(inp, gate, expert_fn, num_expert, world_size):
         fwd_expert_count,
         fwd_batch_size,
     ) = prepare_forward(gate, num_expert, world_size)
+    log.debug(f'local_expert_count:{local_expert_count} global_expert_count:{global_expert_count} fwd_expert_count:{fwd_expert_count}')
     topk = 1
     if len(gate.shape) == 2:
         topk = gate.shape[1]
+    log.debug(f'before scatter shape:{inp.shape}')
     x = MOEScatter.apply(
         inp, pos // topk,
         local_expert_count, global_expert_count, fwd_batch_size, world_size
     )
+    log.debug(f'after scatter shape:{x.shape}')
     x = expert_fn(x, fwd_expert_count)
 
     out_batch_size = inp.shape[0]
@@ -168,7 +175,7 @@ class FMoE(nn.Module):
             self.experts_fused = False
         else:
             self.experts_fused = True
-        self.gate = gate(d_model, num_expert, world_size, top_k)
+        self.gate = gate(d_model*self.block_gate, num_expert, world_size, top_k)
         self.gate_hook = gate_hook
         self.mask = mask
         self.mask_dict = mask_dict
@@ -179,16 +186,24 @@ class FMoE(nn.Module):
         The default expert function which either calls the experts as a whole
         or as separate experts.
         """
+        log.debug(f'shape in expert_fn: {inp.shape}')
+        inp = inp.reshape(-1, self.d_model)
+        log.debug(f'after shape in expert_fn: {inp.shape}')
+        fwd_expert_count *= self.block_gate
         if self.experts_fused:
-            return self.experts(inp, fwd_expert_count)
-        outputs = []
-        base_idx = 0
-        for i in range(self.num_expert):
-            batch_size = fwd_expert_count[i].item()
-            inp_slice = inp[base_idx : base_idx + batch_size]
-            outputs.append(self.experts[i](inp_slice))
-            base_idx += batch_size
-        return torch.cat(outputs, dim=0)
+            ret = self.experts(inp, fwd_expert_count)
+        else:
+            outputs = []
+            base_idx = 0
+            for i in range(self.num_expert):
+                batch_size = fwd_expert_count[i].item()
+                inp_slice = inp[base_idx : base_idx + batch_size]
+                outputs.append(self.experts[i](inp_slice))
+                base_idx += batch_size
+            ret = torch.cat(outputs, dim=0)
+        shape = ret.shape
+        ret = ret.reshape(shape[0]//self.block_gate, shape[1]*self.block_gate)
+        return ret
 
     def mark_parallel_comm(self, expert_dp_comm="none"):
         r"""
@@ -211,6 +226,10 @@ class FMoE(nn.Module):
         according to the gate.  The score of the selected gate given by the
         expert is multiplied to the experts' output tensors as a weight.
         """
+        if self.block_gate > 1:
+            log.info(f'using block gate: {self.block_gate}')
+            inp = inp.view(-1, self.d_model * self.block_gate)
+
         if self.world_size > 1:
             ensure_comm(inp, self.moe_group)
         if self.mp_size > 1:
@@ -244,8 +263,7 @@ class FMoE(nn.Module):
             for k, v in self.mask_dict.items():
                 x[mask == k] = v
         else:
-            x = fwd.view(-1, self.top_k, self.d_model)
-
+            x = fwd.view(-1, self.top_k, self.d_model *self.block_gate)
         gate_score = gate_score.view(x.shape[0], 1, self.top_k)
         x = torch.bmm(gate_score, x).reshape(-1, self.d_model)
 

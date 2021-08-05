@@ -6,7 +6,7 @@ from fmoe.balance import reset_balance_profile
 from fmoe.balance import update_balance_profile
 from fmoe.utils import get_torch_default_comm
 from .distributed import get_moe_group
-
+import fmoe.megatron.layers 
 
 balance_dict = {}
 num_layers = 0
@@ -53,7 +53,7 @@ def add_balance_log(model, writer, iteration):
         model = model.module
 
     balance_dict_tensor = torch.vstack(
-        [l.mlp.gate.get_loss(clear=True) for l in model.language_model.transformer.layers]
+        [l.mlp.gate.get_loss(clear=True) for l in model.language_model.transformer.layers if isinstance(l.mlp, fmoe.megatron.layers.MegatronMLP)]
     ).detach()
     world_group = get_torch_default_comm()
     world_size = torch.distributed.get_world_size(group=world_group)
@@ -96,7 +96,7 @@ def patch_forward_step(forward_step_func):
             model = model.module
 
         loss_list = [l.mlp.gate.get_loss(clear=False).view(1)
-                for l in model.language_model.transformer.layers]
+                for l in model.language_model.transformer.layers if isinstance(l.mlp, fmoe.megatron.layers.MegatronMLP)]
         (loss, state_dict), bal_loss = (
             output,
             torch.cat(loss_list).mean() * args.balance_loss_weight

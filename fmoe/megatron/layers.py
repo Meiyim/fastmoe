@@ -1,6 +1,9 @@
 r"""
 nn modules to replace Megatron's native ones
 """
+import logging
+log = logging.getLogger(__name__)
+
 import math
 import numpy as np
 import torch
@@ -103,7 +106,7 @@ class MegatronMLP(FMoETransformerMLP):
             gate = SwitchGate
         else:
             assert False, "Undefined balance strategy {}" % (args.balance_strategy)
-
+        self.block_gate = args.block_gate
         super().__init__(
             args.num_experts,
             top_k=args.top_k,
@@ -207,8 +210,13 @@ def fmoefy(
                 moe_group = group
         set_moe_group(moe_group)
     for idx, l in enumerate(model.language_model.transformer.layers):
-        l.mlp = MegatronMLP(args, mp_group, moe_group, idx)
-
+        if args.moe_id:
+            if idx in args.moe_id:
+                log.info(f'fmoefy: {idx}')
+                l.mlp = MegatronMLP(args, mp_group, moe_group, idx)
+        else:
+            log.info(f'fmoefy all layers')
+            l.mlp = MegatronMLP(args, mp_group, moe_group, idx)
     # initialize gate hook
     num_layers = len(model.language_model.transformer.layers)
     reset_gate_hook(num_layers)

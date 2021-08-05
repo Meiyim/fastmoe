@@ -10,5 +10,6 @@ def add_fmoe_args(parser):
     group.add_argument("--balance-loss-weight", type=float, default=1)
     group.add_argument("--balance-strategy", type=str, default=None)
     group.add_argument("--hidden-hidden-size", type=int, default=None)
-
+    group.add_argument("--moe-id", nargs='*', type=int, default=None)
+    group.add_argument("--block-gate", type=int, default=1)
     return parser
